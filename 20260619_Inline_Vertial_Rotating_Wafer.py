@@ -1,12 +1,13 @@
 """
-Web-Ready Deposition Uniformity Simulator
+AZ Thin Film Research - Deposition Uniformity Simulator
 -------------------------------------------------------------------------------
 Designed exclusively for Streamlit Web Hosting. 
-Includes mathematical fixes for squished circular colorbars and garbled text.
+Includes automatic logo detection, custom branding, and image watermarks.
 """
 
+import os
 import matplotlib
-# Explicitly force "headless" web rendering to prevent Qt5/Desktop crashes
+# Explicitly force "headless" web rendering to prevent server crashes
 matplotlib.use("Agg")  
 
 import streamlit as st
@@ -15,8 +16,43 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Circle
 
-# --- 1. Page Configuration ---
-st.set_page_config(page_title="Deposition Uniformity Simulator", layout="wide")
+# --- 1. Page Configuration & Custom Branding ---
+st.set_page_config(
+    page_title="AZ Thin Film | Uniformity Simulator", 
+    page_icon="⚙️", 
+    layout="wide"
+)
+
+# Custom CSS to tweak colors and make the app look premium
+st.markdown("""
+    <style>
+    /* Add a branding bar to the top of the app */
+    .block-container {
+        border-top: 5px solid #1E3A8A; /* Professional Deep Blue */
+        padding-top: 2rem;
+    }
+    .main-title {
+        color: #1E3A8A; 
+        font-weight: 800;
+        margin-bottom: -10px;
+    }
+    .sub-title {
+        color: #555555;
+        font-weight: 400;
+        margin-bottom: 20px;
+    }
+    /* Make the metric numbers pop with the brand color */
+    [data-testid="stMetricValue"] {
+        color: #1E3A8A;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Automatically load the company logo if it was uploaded to GitHub
+if os.path.exists("logo.png"):
+    st.logo("logo.png", link="https://www.azthinfilm.com")
+elif os.path.exists("logo.jpg"):
+    st.logo("logo.jpg", link="https://www.azthinfilm.com")
 
 # --- 2. Core Mathematical & Geometry Functions ---
 @st.cache_data
@@ -92,13 +128,26 @@ def compute_thickness(L, v_x, rpm, amp, skew, wx, wy, grid_x, grid_y):
     return thick_pts_norm, thick_grid_norm, unif, abs_dose
 
 # --- 3. Streamlit User Interface ---
-st.title("Rotary Cathode Deposition Uniformity Simulator")
-st.markdown("Interactive quotation tool to evaluate translation and rotation kinematics for 300mm wafers.")
+
+# Top Headers
+st.markdown('<h1 class="main-title">AZ Thin Film Research</h1>', unsafe_allow_html=True)
+st.markdown('<h3 class="sub-title">Rotary Cathode Deposition Uniformity Simulator</h3>', unsafe_allow_html=True)
 
 wx, wy, grid_x, grid_y, R_wafer = setup_geometry()
 
-# HTML Native Sidebar Controls
+# Sidebar Controls & Lead Generation
 with st.sidebar:
+    # Adding a nice branded block in the sidebar
+    if os.path.exists("logo.png"):
+        st.image("logo.png", use_container_width=True)
+    elif os.path.exists("logo.jpg"):
+        st.image("logo.jpg", use_container_width=True)
+    else:
+        st.markdown("<h2 style='text-align: center; color: #1E3A8A;'>AZ Thin Film</h2>", unsafe_allow_html=True)
+        
+    st.markdown("<p style='text-align: center;'><a href='https://www.azthinfilm.com' target='_blank'>www.azthinfilm.com</a></p>", unsafe_allow_html=True)
+    st.divider()
+
     st.header("System Kinematics")
     L = st.slider("Cathode Length (mm)", 650, 900, 800, 10)
     rpm = st.slider("Wafer Rotation (RPM)", 0, 120, 60, 5)
@@ -146,13 +195,13 @@ ax_emission.set_ylabel("Source Emission", color='r')
 ax_emission.set_ylim(0, max(2.0, np.max(emission)*1.2))
 
 rate_y = deposition_rate(0, y_vals, L, amp, skew)
-ax_profile.plot(y_vals, rate_y, 'b-', lw=2.5, label='Diffused Flux')
+ax_profile.plot(y_vals, rate_y, color='#1E3A8A', lw=2.5, label='Diffused Flux')
 ax_profile.axvspan(-R_wafer, R_wafer, color='gray', alpha=0.2, label='Wafer Extent')
 ax_profile.set_xlim(-600, 600)
 ax_profile.set_ylim(0, max(0.001, np.max(rate_y)*1.1))
 ax_profile.set_title("Vertical Source Profile", fontweight='bold')
 ax_profile.set_xlabel("Cathode Axis Y (mm)")
-ax_profile.set_ylabel("Flux Intensity", color='b')
+ax_profile.set_ylabel("Flux Intensity", color='#1E3A8A')
 ax_profile.grid(True, linestyle='--', alpha=0.5)
 
 lines, labels = ax_profile.get_legend_handles_labels()
@@ -165,7 +214,6 @@ ax_map.set_title("Wafer Uniformity Map", fontweight='bold')
 ax_map.set_xlabel("Wafer X (mm)")
 ax_map.set_ylabel("Wafer Y (mm)")
 
-# Lock plot shape to prevent layout squishing
 ax_map.set_aspect('equal')
 ax_map.set_xlim(-160, 160)
 ax_map.set_ylim(-160, 160)
@@ -175,7 +223,6 @@ levels = np.linspace(100 - dev, 100 + dev, 40)
 contour = ax_map.contourf(grid_x, grid_y, thick_grid_norm, levels=levels, cmap='viridis', extend='both')
 ax_map.scatter(wx, wy, c='white', s=15, edgecolors='black', zorder=5)
 
-# BULLETPROOF COLORBAR FIX
 cax_map = ax_map.inset_axes([1.04, 0.0, 0.05, 1.0])
 ticks_map = np.linspace(100 - dev, 100 + dev, 5)
 cbar_map = fig.colorbar(contour, cax=cax_map, ticks=ticks_map)
@@ -188,7 +235,6 @@ ax_chamber.set_title("Top-Down Deposition Plume", fontweight='bold')
 ax_chamber.set_xlabel("Translation Axis X (mm)")
 ax_chamber.set_ylabel("Cathode Axis Y (mm)")
 
-# Lock limits
 ax_chamber.set_aspect('equal')
 ax_chamber.set_xlim(-600, 600)
 ax_chamber.set_ylim(-600, 600)
@@ -197,7 +243,6 @@ CX, CY = np.meshgrid(np.linspace(-600, 600, 80), np.linspace(-600, 600, 80))
 rate_2d = deposition_rate(CX, CY, L, amp, skew)
 chamber_contour = ax_chamber.contourf(CX, CY, rate_2d, levels=40, cmap='magma')
 
-# BULLETPROOF COLORBAR FIX
 cax_chamber = ax_chamber.inset_axes([1.04, 0.0, 0.05, 1.0])
 ticks_ch = np.linspace(0, np.max(rate_2d), 5)
 cbar_chamber = fig.colorbar(chamber_contour, cax=cax_chamber, ticks=ticks_ch)
@@ -211,7 +256,7 @@ ax_chamber.legend(loc='upper right')
 # [Chart 4] 49-Point Scatter
 ax_stats = fig.add_subplot(gs[1, 1])
 pt_radii = np.sqrt(wx**2 + wy**2)
-ax_stats.scatter(pt_radii, thick_pts_norm, c='blue', s=45, alpha=0.7, edgecolors='black')
+ax_stats.scatter(pt_radii, thick_pts_norm, color='#1E3A8A', s=45, alpha=0.7, edgecolors='black')
 ax_stats.axhline(100, color='gray', linestyle='--', lw=2)
 ax_stats.set_title("49-Point Radial Analysis", fontweight='bold')
 ax_stats.set_xlabel("Distance from Wafer Center (mm)")
@@ -219,6 +264,11 @@ ax_stats.set_ylabel("Normalized Thickness (%)")
 ax_stats.set_xlim(-5, 155)
 ax_stats.set_ylim(100 - dev, 100 + dev)
 ax_stats.grid(True, linestyle='--', alpha=0.5)
+
+# --- AZ THIN FILM BRANDING WATERMARK ---
+# Ensures your company name and website travel with any downloaded screenshots!
+fig.text(0.5, 0.02, 'Simulation provided by AZ Thin Film Research  |  www.azthinfilm.com', 
+         ha='center', va='center', fontsize=11, color='#555555', style='italic', weight='bold')
 
 # Send Figure directly to Streamlit Web Page
 st.pyplot(fig)
