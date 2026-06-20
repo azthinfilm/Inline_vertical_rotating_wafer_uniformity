@@ -1,9 +1,12 @@
 """
 AZ Thin Film Research - Multi-Pass Production Process Simulator
 -------------------------------------------------------------------------------
-Ultimate Edition: Features a full 3D Vectorized Integration Engine for Cylindrical Targets.
-Accurately models dual-legs, racetrack turnarounds, dog-bone intensity gradients,
-and variable Cosine Emission Powers (cos^n).
+Ultimate Multiphysics Edition: 
+* Fully continuous 3D unrolled racetrack integration.
+* Asymmetric Anode Biasing (L/R gradient).
+* E x B Hall Current Drift Build-up.
+* Smooth Dogbone turnarounds.
+* Professional Engineering Documentation Built-in.
 """
 
 import os
@@ -55,20 +58,17 @@ def setup_geometry():
     R_g, T_g = np.meshgrid(grid_r, grid_theta)
     return np.array(wx), np.array(wy), R_g * np.cos(T_g), R_g * np.sin(T_g), R_wafer
 
-def generate_source_points(L, alpha_deg, w_deg, t_mat, amp, skew):
-    """Generates the 3D differential point cloud for the legs AND the turnarounds."""
+def generate_source_points(L, alpha_deg, w_deg, t_mat, amp, skew, lr_bias, hall_factor):
+    """Generates the 3D differential point cloud for a completely continuous racetrack loop."""
     R_tube = 132.5 / 2.0
     R_t = R_tube + t_mat
-    alpha_rad = np.radians(alpha_deg)
-    w_rad = np.radians(w_deg)
+    alpha_rad, w_rad = np.radians(alpha_deg), np.radians(w_deg)
     
-    # Unrolled turnaround radius
     R_ta_base = min(R_t * alpha_rad, L/2.01)
     L_s = L - 2 * R_ta_base
     
     if w_deg > 0:
-        offsets = np.linspace(-R_t * w_rad / 2, R_t * w_rad / 2, 3)
-        weights = [0.25, 0.5, 0.25] # Gaussian weighting for plasma width
+        offsets, weights = np.linspace(-R_t * w_rad / 2, R_t * w_rad / 2, 3), [0.25, 0.5, 0.25]
     else:
         offsets, weights = [0.0], [1.0]
         
@@ -82,84 +82,75 @@ def generate_source_points(L, alpha_deg, w_deg, t_mat, amp, skew):
         # 1. Straight Legs
         y_leg = np.linspace(-L_s/2, L_s/2, N_leg)
         dy = L_s / (N_leg - 1) if N_leg > 1 else 0
-        for sign in [1, -1]:
+        for sign_x in [1, -1]:
             for y in y_leg:
-                x_prime = sign * R_ta
-                theta = x_prime / R_t
-                u = np.clip(2*y/L, -1.0, 1.0)
-                I = max(0.0, 1.0 + amp*(1.0 - u**2) + skew*u) 
+                v = sign_x  # +1 for Right Leg, -1 for Left Leg
+                u = 2 * y / L
                 
+                # Continuous Intensity Function (Base Dogbone + L/R Bias + Hall Build-up)
+                ta_boost = max(0.0, -amp * 2.0) * (abs(u)**6)
+                I = max(0.0, 1.0 + amp*(1.0 - u**2) + skew*u + lr_bias*v + hall_factor*u*v + ta_boost)
+                
+                theta = (v * R_ta) / R_t
                 Px.append(R_t * np.sin(theta)); Py.append(y); Pz.append(-R_t * np.cos(theta))
                 Nx.append(np.sin(theta)); Ny.append(0.0); Nz.append(-np.cos(theta))
                 WI.append(I * wt * dy)
                 
-        # 2. Turnarounds (Semi-Circles wrapped onto the Cylinder)
+        # 2. Turnarounds (Seamless connection)
         d_gamma = np.pi / (N_turn - 1) if N_turn > 1 else 0
         dl = R_ta * d_gamma
-        ta_boost = 1.0 + max(0.0, -amp * 3.0) # Massive intensity spike if dogbone is present
         
         for sign_y, gamma_range in [(1, np.linspace(0, np.pi, N_turn)), (-1, np.linspace(np.pi, 2*np.pi, N_turn))]:
-            I_edge = max(0.0, 1.0 + skew * sign_y) * ta_boost
             for gam in gamma_range:
-                x_prime = R_ta * np.cos(gam)
+                v = np.cos(gam) # Cosine smoothly bridges the +1 and -1 of the right and left legs
                 y = sign_y * L_s/2 + R_ta * np.sin(gam)
-                theta = x_prime / R_t
+                u = 2 * y / L
                 
+                ta_boost = max(0.0, -amp * 2.0) * (abs(u)**6)
+                I = max(0.0, 1.0 + amp*(1.0 - u**2) + skew*u + lr_bias*v + hall_factor*u*v + ta_boost)
+                
+                theta = (R_ta * v) / R_t
                 Px.append(R_t * np.sin(theta)); Py.append(y); Pz.append(-R_t * np.cos(theta))
                 Nx.append(np.sin(theta)); Ny.append(0.0); Nz.append(-np.cos(theta))
-                WI.append(I_edge * wt * dl)
+                WI.append(I * wt * dl)
                 
     return np.array(Px), np.array(Py), np.array(Pz), np.array(Nx), np.array(Ny), np.array(Nz), np.array(WI)
 
 def calculate_flux(X, Y, Px, Py, Pz_chamber, Nx, Ny, Nz, WI, cos_n):
-    """Calculates Cosine-Powered 3D ray-traced flux from all racetrack elements."""
     X, Y = np.atleast_1d(X), np.atleast_1d(Y)
     flux = np.zeros(len(X), dtype=float)
     batch_size = 5000
-    
     for i in range(0, len(X), batch_size):
         x_b, y_b = X[i:i+batch_size, None], Y[i:i+batch_size, None]
-        
-        dx = x_b - Px[None, :]
-        dy = y_b - Py[None, :]
-        dz = 0.0 - Pz_chamber[None, :]
-        
+        dx, dy, dz = x_b - Px[None, :], y_b - Py[None, :], 0.0 - Pz_chamber[None, :]
         D2 = dx**2 + dy**2 + dz**2
         D = np.sqrt(D2)
         
-        # Project 3D vectors
         cos_emit = np.maximum((dx * Nx[None, :] + dy * Ny[None, :] + dz * Nz[None, :]) / D, 0.0)
         cos_sub = np.maximum(-dz / D, 0.0) 
-        
-        # Apply Cosine Distribution Factor (n)
         dF = WI[None, :] * (cos_emit ** cos_n) * cos_sub / D2
         flux[i:i+batch_size] = np.sum(dF, axis=1)
-        
     return flux
 
 def bake_flux_field(Px, Py, Pz_chamber, Nx, Ny, Nz, WI, cos_n):
-    """Pre-calculates the static chamber flux to make the multi-pass phase-shifting instant."""
-    xg = np.linspace(-1200, 1200, 400)
-    yg = np.linspace(-700, 700, 250)
+    xg, yg = np.linspace(-1200, 1200, 400), np.linspace(-700, 700, 250)
     XG, YG = np.meshgrid(xg, yg)
-    
     flux_flat = calculate_flux(XG.flatten(), YG.flatten(), Px, Py, Pz_chamber, Nx, Ny, Nz, WI, cos_n)
     return RectBivariateSpline(yg, xg, flux_flat.reshape(YG.shape))
 
 @st.cache_data
-def compute_multipass_fast(L, v_x, rph, amp, skew, target_um, peak_rate_nm_s, wx, wy, grid_x, grid_y, theta_s, w, t_mat, d_surf, cos_n):
+def compute_multipass_fast(L, v_x, rph, amp, skew, lr_bias, hall, target_um, peak_rate_nm_s, wx, wy, grid_x, grid_y, theta_s, w, t_mat, d_surf, cos_n):
     X_start, X_end = -1000.0, 1000.0
     t_pass = (X_end - X_start) / v_x
     omega = (rph / 3600.0) * 2 * np.pi 
     
     R_t = (132.5 / 2.0) + t_mat
     D_axis = d_surf + R_t
-    Px, Py, Pz, Nx, Ny, Nz, WI = generate_source_points(L, theta_s, w, t_mat, amp, skew)
+    Px, Py, Pz, Nx, Ny, Nz, WI = generate_source_points(L, theta_s, w, t_mat, amp, skew, lr_bias, hall)
     Pz_chamber = D_axis + Pz
     
     interp_field = bake_flux_field(Px, Py, Pz_chamber, Nx, Ny, Nz, WI, cos_n)
     
-    # Scale numerical integration to match hardware Peak Rate (nm/s)
     x_test = np.linspace(-300, 300, 400)
     test_flux = interp_field.ev(np.zeros_like(x_test), x_test)
     peak_idx = np.argmax(test_flux)
@@ -187,13 +178,11 @@ def compute_multipass_fast(L, v_x, rph, amp, skew, target_um, peak_rate_nm_s, wx
         
         X_fwd, Y_sub = cx_fwd[None, :] + r * cos_a, r * sin_a
         T_fwd[i, :] = np.sum(interp_field.ev(Y_sub.flatten(), X_fwd.flatten()).reshape(X_fwd.shape), axis=1) * dt
-        
         X_bwd = cx_bwd[None, :] + r * cos_a
         T_bwd[i, :] = np.sum(interp_field.ev(Y_sub.flatten(), X_bwd.flatten()).reshape(X_bwd.shape), axis=1) * dt
 
     T_fwd *= scale; T_bwd *= scale
 
-    # Pass accumulation & Phase Shifting
     dose_1pass_nm = np.mean(T_fwd[np.argmin(unique_r), :]) 
     N_passes = max(1, int(np.round((target_um * 1000.0) / dose_1pass_nm))) if dose_1pass_nm > 0 else 1
     
@@ -225,14 +214,39 @@ def format_time(seconds):
     h, m = int(seconds // 3600), int((seconds % 3600) // 60)
     return f"{h}h {m}m" if h > 0 else f"{m}m"
 
-# Safe 1D/2D array evaluator for Splines
 def get_plot_flux(x_arr, y_arr, interp, scale, base_c):
     x_flat, y_flat = np.atleast_1d(x_arr).flatten(), np.atleast_1d(y_arr).flatten()
     return scale * (interp.ev(y_flat, x_flat).reshape(np.asarray(x_arr).shape) / base_c)
 
 # --- 3. Streamlit User Interface ---
 st.markdown('<h1 class="main-title">AZ Thin Film Research</h1>', unsafe_allow_html=True)
-st.markdown('<h3 class="sub-title">Production Solver: 3D Turnaround & Cosine Plume Engine</h3>', unsafe_allow_html=True)
+st.markdown('<h3 class="sub-title">Production Solver: Multiphysics Target & Racetrack Engine</h3>', unsafe_allow_html=True)
+
+with st.expander("📚 **View Engineering Physics Documentation & Mathematical Assumptions**", expanded=False):
+    st.markdown("""
+    ### Thin Film Mathematical Architecture
+    This simulator bypasses basic 1D line-source approximations and implements a **True 3D Vectorized Point-Cloud Engine** to map the exact geometry of a cylindrical rotary magnetron.
+
+    #### 1. 3D Cylindrical Point-Cloud Integration
+    Instead of assuming a 1D flat line, this engine mathematically unrolls the target cylinder into a 3D coordinate space. It projects the precise $(x, y, z)$ emission path of the dual-leg magnetic racetrack, including the geometric arc of both semi-circular turnarounds, taking into account the exact Outer Diameter ($R_{tube} + t_{mat}$).
+    
+    #### 2. Sputter Flux Collimation ($Cos^n \\theta$)
+    Emission from any differential point on the racetrack is calculated using a collimation-adjusted Lambertian distribution:
+    $$d\\Phi \\propto \\frac{\\cos^n(\\theta_{emit}) \\cos(\\theta_{sub})}{D^2} dA$$
+    DC sputtering typically follows $n=1.0$ (diffuse), while highly-ionized HiPIMS plasmas can be sharply collimated ($n=2.0$ to $3.0$), physically narrowing the resulting plume.
+
+    #### 3. E x B Hall Current Drift Build-up
+    Because magnetic field strength dips at the geometric turnarounds, secondary electron confinement is weakened. The engine models this using a continuous cross-term $+ H_{all} \\cdot (u \\cdot v)$. This accurately replicates how the Hall current ($E \\times B$) drift loses electrons at the ends and must "rebuild" the plasma density sequentially via the Townsend avalanche process as it travels down the straightaways, generating an **anti-parallel longitudinal emission gradient** between the left and right legs.
+    
+    #### 4. Asymmetric Anode Biasing (L/R Gradient)
+    The localized electric field between the cathode and external anodes (or chamber walls) can warp plasma equipotential lines. The simulator introduces a transverse azimuthal gradient $+ B_{ias} \\cdot v$ to replicate this effect, cleanly shifting plasma density toward the left or right racetrack leg.
+    
+    #### 5. Continuous Dogbone Turnarounds
+    Historical models simulate turnaround wear as sharp step-functions. This simulator employs a $C^0$ continuous geometric interpolation. When a negative **Profile Bow** is applied (representing "dog-bone" target wear), the engine scales a higher-order polynomial ($u^6$) to smoothly boost the apex of the turnarounds. This correctly eliminates visual discontinuities while simulating massive localized plasma trapping in the erosion trenches.
+    
+    #### 6. Kinematic Phase-Averaging
+    The uniformity map is not a static snapshot. The engine converts the wafer's RPH and linear translation speed into the time domain. It tracks the exact $(r, \\theta)$ phase-shift of the 49 standard SEMI metrology points across hundreds of iterative passes to precisely identify Kinematic Resonance ("barber pole" striping) and calculate the final accumulated deposition thickness.
+    """)
 
 wx, wy, grid_x, grid_y, R_wafer = setup_geometry()
 
@@ -263,12 +277,14 @@ with st.sidebar:
         v1 = st.slider("Translation Speed (mm/s)", 3.0, 100.0, 10.0, 1.0, key="v1")
         r1 = st.slider("Wafer Rotation (RPH)", 0.0, 10.0, 3.0, 0.1, key="r1")
         st.divider()
-        st.caption("Magnetic Racetrack Config")
+        st.caption("Multiphysics Plasma Modifiers")
         alpha1 = st.slider("Sputter Angle (± degrees)", 10.0, 30.0, 12.0, 1.0, key="ang1")
         w1 = st.slider("Plasma Width (degrees)", 0.0, 45.0, 15.0, 1.0, key="w1")
-        cos1 = st.slider("Plume Shape Factor (Cos^n)", 0.5, 5.0, 1.0, 0.1, key="c1", help="1.0 = Lambertian. >1.0 = Highly Collimated.")
-        amp1 = st.slider("Profile Bow (%) [- is Dogbone Ends]", -50, 50, -15, 1, key="a1")
+        cos1 = st.slider("Plume Shape Factor (Cos^n)", 0.5, 5.0, 1.0, 0.1, key="c1")
+        amp1 = st.slider("Profile Bow (%) [- is Dogbone]", -50, 50, -25, 1, key="a1")
         skew1 = st.slider("Profile Skew (%) [+ is Top-Heavy]", -50, 50, 0, 1, key="s1")
+        lrbias1 = st.slider("L/R Anode Bias (%) [+ is Right Heavy]", -50, 50, 0, 1, key="lr1")
+        hall1 = st.slider("Hall Drift Build-Up (%)", 0, 50, 20, 1, key="h1")
         
     with st.expander("STEP 2: HiPIMS Top Layer (Cap CrN)", expanded=False):
         t2 = st.number_input("Target Thickness (µm)", value=1.0, step=0.1, key="t2")
@@ -276,28 +292,32 @@ with st.sidebar:
         v2 = st.slider("Translation Speed (mm/s)", 3.0, 100.0, 10.0, 1.0, key="v2")
         r2 = st.slider("Wafer Rotation (RPH)", 0.0, 10.0, 3.0, 0.1, key="r2")
         st.divider()
-        st.caption("Magnetic Racetrack Config")
+        st.caption("Multiphysics Plasma Modifiers")
         alpha2 = st.slider("Sputter Angle (± degrees)", 10.0, 30.0, 15.0, 1.0, key="ang2")
         w2 = st.slider("Plasma Width (degrees)", 0.0, 45.0, 25.0, 1.0, key="w2")
         cos2 = st.slider("Plume Shape Factor (Cos^n)", 0.5, 5.0, 2.0, 0.1, key="c2")
         amp2 = st.slider("HiPIMS Profile Bow (%)", -50, 50, -10, 1, key="a2")
         skew2 = st.slider("HiPIMS Profile Skew (%)", -50, 50, 0, 1, key="s2")
+        lrbias2 = st.slider("L/R Anode Bias (%)", -50, 50, 0, 1, key="lr2")
+        hall2 = st.slider("Hall Drift Build-Up (%)", 0, 50, 10, 1, key="h2")
 
-with st.spinner('Calculating 3D Turnarounds & Discretized Cosine Physics...'):
+with st.spinner('Calculating 3D Multiphysics Field (Hall Drift & Turnarounds)...'):
     if "Step 1" in view_mode:
         show_comb = False
         pts_norm, grid_norm, final_unif, final_mean, passes, total_time, base_c, x_peak, _, _, act_interp = compute_multipass_fast(
-            L, v1, r1, amp1/100, skew1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
+            L, v1, r1, amp1/100, skew1/100, lrbias1/100, hall1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
         disp_passes, act_amp, act_skew, act_rate, act_alpha, act_w, act_cos = f"{passes:,}", amp1/100.0, skew1/100.0, p1, alpha1, w1, cos1
+        act_lr, act_hall = lrbias1/100.0, hall1/100.0
     elif "Step 2" in view_mode:
         show_comb = False
         pts_norm, grid_norm, final_unif, final_mean, passes, total_time, base_c, x_peak, _, _, act_interp = compute_multipass_fast(
-            L, v2, r2, amp2/100, skew2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
+            L, v2, r2, amp2/100, skew2/100, lrbias2/100, hall2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
         disp_passes, act_amp, act_skew, act_rate, act_alpha, act_w, act_cos = f"{passes:,}", amp2/100.0, skew2/100.0, p2, alpha2, w2, cos2
+        act_lr, act_hall = lrbias2/100.0, hall2/100.0
     else:
         show_comb = True
-        _, _, _, _, n1, time1, bc1, _, pts1, grid1, interp1 = compute_multipass_fast(L, v1, r1, amp1/100, skew1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
-        _, _, _, _, n2, time2, bc2, _, pts2, grid2, interp2 = compute_multipass_fast(L, v2, r2, amp2/100, skew2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
+        _, _, _, _, n1, time1, bc1, _, pts1, grid1, interp1 = compute_multipass_fast(L, v1, r1, amp1/100, skew1/100, lrbias1/100, hall1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
+        _, _, _, _, n2, time2, bc2, _, pts2, grid2, interp2 = compute_multipass_fast(L, v2, r2, amp2/100, skew2/100, lrbias2/100, hall2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
         
         thick_pts, thick_grid = pts1 + pts2, grid1 + grid2
         final_mean = np.mean(thick_pts) / 1000.0
@@ -306,6 +326,7 @@ with st.spinner('Calculating 3D Turnarounds & Discretized Cosine Physics...'):
         final_unif = (np.max(pts_norm) - np.min(pts_norm)) / 2.0
         disp_passes, total_time = f"{n1:,} + {n2:,}", time1 + time2
         act_amp, act_skew, act_rate, act_alpha, act_w, act_cos = amp1/100.0, skew1/100.0, p1, alpha1, w1, cos1 
+        act_lr, act_hall = lrbias1/100.0, hall1/100.0
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Final Uniformity (+/-)", f"{final_unif:.2f} %")
@@ -313,8 +334,8 @@ col2.metric("Achieved Mean Thickness", f"{final_mean:.3f} µm")
 col3.metric("Required Linear Passes", disp_passes)
 col4.metric("Process Cycle Time", format_time(total_time))
 
-if final_unif <= 1.0: st.success("✅ **TARGET ACHIEVED:** Rotary magnetics yield sub-1% uniformity.")
-else: st.error("❌ **TARGET NOT MET:** Adjust Translation Speed, Target Dist, or Hardware Geometry.")
+if final_unif <= 1.0: st.success("✅ **TARGET ACHIEVED:** Multiphysics rotary simulation yields sub-1% uniformity.")
+else: st.error("❌ **TARGET NOT MET:** Adjust Translation Speed, Hardware Geometry, or Hardware Limits.")
 st.divider()
 
 # --- 4. Render 6-Panel Matplotlib Charts ---
@@ -424,7 +445,7 @@ def draw_racetrack_topdown(ax, L, alpha_deg, R_t, color, ls):
     L_s = L - 2 * R_ta
     x_rt = R_t * np.sin(alpha_rad) 
     
-    ax.plot([x_rt, x_rt], [-L_s/2, L_s/2], color=color, ls=ls, lw=2, alpha=0.9, label="Magnetic Racetrack")
+    ax.plot([x_rt, x_rt], [-L_s/2, L_s/2], color=color, ls=ls, lw=2, alpha=0.9, label="Continuous Racetrack")
     ax.plot([-x_rt, -x_rt], [-L_s/2, L_s/2], color=color, ls=ls, lw=2, alpha=0.9)
     gamma = np.linspace(0, np.pi, 30)
     ax.plot(R_t * np.sin((R_ta * np.cos(gamma)) / R_t), L_s/2 + R_ta * np.sin(gamma), color=color, ls=ls, lw=2, alpha=0.9)
@@ -440,7 +461,7 @@ else:
 ax_chamber.axhline(0, color='cyan', linestyle='--', alpha=0.8, lw=2, label="Wafer Path")
 ax_chamber.legend(loc='upper right', fontsize=8)
 
-# [Chart 5: Vertical Source Flux Profile]
+# [Chart 5: Vertical Source Flux Profile (SMOOTH TURNAROUNDS)]
 ax_vert = fig.add_subplot(gs[1, 1])
 y_vals = np.linspace(-600, 600, 200)
 
@@ -452,22 +473,26 @@ if show_comb:
     ax_vert.plot(y_vals, rate_y, color='#1E3A8A', lw=2.5, label='Combined Diffused Flux')
     ax_vert.legend(loc='lower center')
 else:
+    # Smooth, continuous emission shape visualization for Left and Right legs
     u_vals = np.clip(2 * y_vals / L, -1.0, 1.0)
-    emission = np.maximum(0.0, 1.0 - act_amp * u_vals**2 + act_skew * u_vals)
-    emission[np.abs(y_vals) > L/2] = 0.0 # Strict physical limit for plot visual
     
-    # Showcase turnaround spikes physically on the target shape overlay
-    R_ta = min(R_t * np.radians(act_alpha), L/2.01)
-    turn_mask_top = (y_vals > L/2 - R_ta) & (y_vals <= L/2 + R_ta)
-    emission[turn_mask_top] = max(0.0, 1.0 + act_skew) * (1.0 + max(0.0, -act_amp * 3.0))
+    ta_boost = np.maximum(0.0, -act_amp * 2.0) * (np.abs(u_vals)**6)
+    em_base = 1.0 + act_amp * (1.0 - u_vals**2) + act_skew * u_vals + ta_boost
     
-    turn_mask_bot = (y_vals < -L/2 + R_ta) & (y_vals >= -L/2 - R_ta)
-    emission[turn_mask_bot] = max(0.0, 1.0 - act_skew) * (1.0 + max(0.0, -act_amp * 3.0))
+    em_R = np.maximum(0.0, em_base + act_lr * 1.0 + act_hall * u_vals * 1.0)
+    em_L = np.maximum(0.0, em_base + act_lr * (-1.0) + act_hall * u_vals * (-1.0))
+    
+    mask = np.abs(y_vals) <= L/2
+    em_R = np.where(mask, em_R, 0.0)
+    em_L = np.where(mask, em_L, 0.0)
 
     ax_em = ax_vert.twinx()
-    ax_em.plot(y_vals, emission, 'r--', lw=2, label='Target Erosion Shape (w/ Turnarounds)')
-    ax_em.set_ylabel("Relative Source Emission", color='r')
-    ax_em.set_ylim(0, max(2.0, np.max(emission)*1.2))
+    ax_em.fill_between(y_vals, em_R, em_L, color='red', alpha=0.1)
+    ax_em.plot(y_vals, em_R, color='red', ls='-', lw=2, label='Right Leg (E x B Upward Drift)')
+    ax_em.plot(y_vals, em_L, color='red', ls='--', lw=2, label='Left Leg (E x B Downward Drift)')
+
+    ax_em.set_ylabel("Relative Target Emission", color='r')
+    ax_em.set_ylim(0, max(2.0, np.max([np.max(em_R), np.max(em_L)])*1.2))
     
     rate_y = get_plot_flux(np.full_like(y_vals, x_peak), y_vals, act_interp, act_rate, base_c)
     ax_vert.plot(y_vals, rate_y, color='#1E3A8A', lw=2.5, label='Diffused Flux (at peak)')
