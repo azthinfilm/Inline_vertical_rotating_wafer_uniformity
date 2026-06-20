@@ -2,11 +2,9 @@
 AZ Thin Film Research - Multi-Pass Production Process Simulator
 -------------------------------------------------------------------------------
 Ultimate Multiphysics Edition: 
+* Features exact Inter-pass Dwell Rotation indexing to break Kinematic Resonance.
 * Fully continuous 3D unrolled racetrack integration.
-* Asymmetric Anode Biasing (L/R gradient).
-* E x B Hall Current Drift Build-up.
-* Smooth Dogbone turnarounds.
-* Professional Engineering Documentation Built-in.
+* E x B Hall Current Drift & Asymmetric Anode Biasing.
 """
 
 import os
@@ -79,15 +77,13 @@ def generate_source_points(L, alpha_deg, w_deg, t_mat, amp, skew, lr_bias, hall_
     for off, wt in zip(offsets, weights):
         R_ta = max(R_ta_base + off, 1.0)
         
-        # 1. Straight Legs
+        # Straight Legs
         y_leg = np.linspace(-L_s/2, L_s/2, N_leg)
         dy = L_s / (N_leg - 1) if N_leg > 1 else 0
         for sign_x in [1, -1]:
             for y in y_leg:
-                v = sign_x  # +1 for Right Leg, -1 for Left Leg
+                v = sign_x 
                 u = 2 * y / L
-                
-                # Continuous Intensity Function (Base Dogbone + L/R Bias + Hall Build-up)
                 ta_boost = max(0.0, -amp * 2.0) * (abs(u)**6)
                 I = max(0.0, 1.0 + amp*(1.0 - u**2) + skew*u + lr_bias*v + hall_factor*u*v + ta_boost)
                 
@@ -96,16 +92,14 @@ def generate_source_points(L, alpha_deg, w_deg, t_mat, amp, skew, lr_bias, hall_
                 Nx.append(np.sin(theta)); Ny.append(0.0); Nz.append(-np.cos(theta))
                 WI.append(I * wt * dy)
                 
-        # 2. Turnarounds (Seamless connection)
+        # Turnarounds
         d_gamma = np.pi / (N_turn - 1) if N_turn > 1 else 0
         dl = R_ta * d_gamma
-        
         for sign_y, gamma_range in [(1, np.linspace(0, np.pi, N_turn)), (-1, np.linspace(np.pi, 2*np.pi, N_turn))]:
             for gam in gamma_range:
-                v = np.cos(gam) # Cosine smoothly bridges the +1 and -1 of the right and left legs
+                v = np.cos(gam)
                 y = sign_y * L_s/2 + R_ta * np.sin(gam)
                 u = 2 * y / L
-                
                 ta_boost = max(0.0, -amp * 2.0) * (abs(u)**6)
                 I = max(0.0, 1.0 + amp*(1.0 - u**2) + skew*u + lr_bias*v + hall_factor*u*v + ta_boost)
                 
@@ -125,7 +119,6 @@ def calculate_flux(X, Y, Px, Py, Pz_chamber, Nx, Ny, Nz, WI, cos_n):
         dx, dy, dz = x_b - Px[None, :], y_b - Py[None, :], 0.0 - Pz_chamber[None, :]
         D2 = dx**2 + dy**2 + dz**2
         D = np.sqrt(D2)
-        
         cos_emit = np.maximum((dx * Nx[None, :] + dy * Ny[None, :] + dz * Nz[None, :]) / D, 0.0)
         cos_sub = np.maximum(-dz / D, 0.0) 
         dF = WI[None, :] * (cos_emit ** cos_n) * cos_sub / D2
@@ -139,10 +132,11 @@ def bake_flux_field(Px, Py, Pz_chamber, Nx, Ny, Nz, WI, cos_n):
     return RectBivariateSpline(yg, xg, flux_flat.reshape(YG.shape))
 
 @st.cache_data
-def compute_multipass_fast(L, v_x, rph, amp, skew, lr_bias, hall, target_um, peak_rate_nm_s, wx, wy, grid_x, grid_y, theta_s, w, t_mat, d_surf, cos_n):
+def compute_multipass_fast(L, v_x, rph, dwell_deg, amp, skew, lr_bias, hall, target_um, peak_rate_nm_s, wx, wy, grid_x, grid_y, theta_s, w, t_mat, d_surf, cos_n):
     X_start, X_end = -1000.0, 1000.0
     t_pass = (X_end - X_start) / v_x
     omega = (rph / 3600.0) * 2 * np.pi 
+    dwell_rad = np.radians(dwell_deg)
     
     R_t = (132.5 / 2.0) + t_mat
     D_axis = d_surf + R_t
@@ -186,7 +180,10 @@ def compute_multipass_fast(L, v_x, rph, amp, skew, lr_bias, hall, target_um, pea
     dose_1pass_nm = np.mean(T_fwd[np.argmin(unique_r), :]) 
     N_passes = max(1, int(np.round((target_um * 1000.0) / dose_1pass_nm))) if dose_1pass_nm > 0 else 1
     
-    phi_pd, start_angles = np.append(phi_arr, 2*np.pi), (np.arange(N_passes) * omega * t_pass) % (2*np.pi)
+    # Phase Accumulation Logic (Applies the specific Dwell Rotation Offset between passes)
+    phi_pd = np.append(phi_arr, 2*np.pi)
+    start_angles = (np.arange(N_passes) * (omega * t_pass + dwell_rad)) % (2*np.pi)
+    
     T_fwd_pd, T_bwd_pd = np.column_stack((T_fwd, T_fwd[:, 0])), np.column_stack((T_bwd, T_bwd[:, 0]))
     
     thick_pts = np.zeros(len(r_pts))
@@ -208,11 +205,22 @@ def compute_multipass_fast(L, v_x, rph, amp, skew, lr_bias, hall, target_um, pea
     grid_norm = (thick_grid / mean_th) * 100.0 if mean_th > 0 else thick_grid * 0
     unif = (np.max(pts_norm) - np.min(pts_norm)) / 2.0 if mean_th > 0 else 0
     
-    return pts_norm, grid_norm, unif, mean_th / 1000.0, N_passes, N_passes * t_pass, base_peak_flux, x_peak, thick_pts, thick_grid, interp_field
+    # Accurate Cycle Time Calculation including Dwell waits
+    if omega > 1e-9:
+        t_dwell_sec = dwell_rad / omega
+    else:
+        # Assume a rapid 10 RPM mechanical indexer if the continuous RPH is zero
+        t_dwell_sec = dwell_rad / (10.0 * 2 * np.pi / 60.0) 
+        
+    total_time = N_passes * t_pass + max(0, N_passes - 1) * t_dwell_sec
+    
+    return pts_norm, grid_norm, unif, mean_th / 1000.0, N_passes, total_time, base_peak_flux, x_peak, thick_pts, thick_grid, interp_field
 
 def format_time(seconds):
-    h, m = int(seconds // 3600), int((seconds % 3600) // 60)
-    return f"{h}h {m}m" if h > 0 else f"{m}m"
+    h, m, s = int(seconds // 3600), int((seconds % 3600) // 60), int(seconds % 60)
+    if h > 0: return f"{h}h {m}m"
+    elif m > 0: return f"{m}m {s}s"
+    else: return f"{s}s"
 
 def get_plot_flux(x_arr, y_arr, interp, scale, base_c):
     x_flat, y_flat = np.atleast_1d(x_arr).flatten(), np.atleast_1d(y_arr).flatten()
@@ -220,7 +228,7 @@ def get_plot_flux(x_arr, y_arr, interp, scale, base_c):
 
 # --- 3. Streamlit User Interface ---
 st.markdown('<h1 class="main-title">AZ Thin Film Research</h1>', unsafe_allow_html=True)
-st.markdown('<h3 class="sub-title">Production Solver: Multiphysics Target & Racetrack Engine</h3>', unsafe_allow_html=True)
+st.markdown('<h3 class="sub-title">Production Solver: Multiphysics Target & Clocking Engine</h3>', unsafe_allow_html=True)
 
 with st.expander("📚 **View Engineering Physics Documentation & Mathematical Assumptions**", expanded=False):
     st.markdown("""
@@ -235,17 +243,17 @@ with st.expander("📚 **View Engineering Physics Documentation & Mathematical A
     $$d\\Phi \\propto \\frac{\\cos^n(\\theta_{emit}) \\cos(\\theta_{sub})}{D^2} dA$$
     DC sputtering typically follows $n=1.0$ (diffuse), while highly-ionized HiPIMS plasmas can be sharply collimated ($n=2.0$ to $3.0$), physically narrowing the resulting plume.
 
-    #### 3. E x B Hall Current Drift Build-up
+    #### 3. Turnaround Phase Synchronization (Kinematic Clocking)
+    The uniformity map explicitly tracks the absolute azimuthal phase ($\\theta$) of the wafer at every moment. During translation, the wafer rotates at the defined RPH. Once out of the plasma plume, the engine mathematically halts translation, applies the user-defined **End-of-Pass Dwell Index**, calculates the resulting time penalty, and sets the precise, shifted starting clock angle for the subsequent reverse pass. This completely eliminates phase-averaging errors associated with instantaneous turnaround assumptions and allows engineering control over destructive phase interference.
+    
+    #### 4. E x B Hall Current Drift Build-up
     Because magnetic field strength dips at the geometric turnarounds, secondary electron confinement is weakened. The engine models this using a continuous cross-term $+ H_{all} \\cdot (u \\cdot v)$. This accurately replicates how the Hall current ($E \\times B$) drift loses electrons at the ends and must "rebuild" the plasma density sequentially via the Townsend avalanche process as it travels down the straightaways, generating an **anti-parallel longitudinal emission gradient** between the left and right legs.
     
-    #### 4. Asymmetric Anode Biasing (L/R Gradient)
-    The localized electric field between the cathode and external anodes (or chamber walls) can warp plasma equipotential lines. The simulator introduces a transverse azimuthal gradient $+ B_{ias} \\cdot v$ to replicate this effect, cleanly shifting plasma density toward the left or right racetrack leg.
+    #### 5. Asymmetric Anode Biasing (L/R Gradient)
+    The localized electric field between the cathode and external anodes (or chamber walls) can warp plasma equipotential lines. The simulator introduces a transverse azimuthal gradient $+ B_{ias} \\cdot v$ to cleanly shift plasma density toward the left or right racetrack leg.
     
-    #### 5. Continuous Dogbone Turnarounds
+    #### 6. Continuous Dogbone Turnarounds
     Historical models simulate turnaround wear as sharp step-functions. This simulator employs a $C^0$ continuous geometric interpolation. When a negative **Profile Bow** is applied (representing "dog-bone" target wear), the engine scales a higher-order polynomial ($u^6$) to smoothly boost the apex of the turnarounds. This correctly eliminates visual discontinuities while simulating massive localized plasma trapping in the erosion trenches.
-    
-    #### 6. Kinematic Phase-Averaging
-    The uniformity map is not a static snapshot. The engine converts the wafer's RPH and linear translation speed into the time domain. It tracks the exact $(r, \\theta)$ phase-shift of the 49 standard SEMI metrology points across hundreds of iterative passes to precisely identify Kinematic Resonance ("barber pole" striping) and calculate the final accumulated deposition thickness.
     """)
 
 wx, wy, grid_x, grid_y, R_wafer = setup_geometry()
@@ -276,6 +284,7 @@ with st.sidebar:
         p1 = st.number_input("Peak Target Rate (nm/s)", value=30.0, step=1.0, key="p1")
         v1 = st.slider("Translation Speed (mm/s)", 3.0, 100.0, 10.0, 1.0, key="v1")
         r1 = st.slider("Wafer Rotation (RPH)", 0.0, 10.0, 3.0, 0.1, key="r1")
+        dwell1 = st.slider("Turnaround Dwell Rotation (deg)", 0, 355, 90, 5, key="dw1", help="Mechanical indexing applied at the end of the stroke before reversing pass direction.")
         st.divider()
         st.caption("Multiphysics Plasma Modifiers")
         alpha1 = st.slider("Sputter Angle (± degrees)", 10.0, 30.0, 12.0, 1.0, key="ang1")
@@ -291,6 +300,7 @@ with st.sidebar:
         p2 = st.number_input("Peak Target Rate (nm/s)", value=10.0, step=1.0, key="p2")
         v2 = st.slider("Translation Speed (mm/s)", 3.0, 100.0, 10.0, 1.0, key="v2")
         r2 = st.slider("Wafer Rotation (RPH)", 0.0, 10.0, 3.0, 0.1, key="r2")
+        dwell2 = st.slider("Turnaround Dwell Rotation (deg)", 0, 355, 90, 5, key="dw2")
         st.divider()
         st.caption("Multiphysics Plasma Modifiers")
         alpha2 = st.slider("Sputter Angle (± degrees)", 10.0, 30.0, 15.0, 1.0, key="ang2")
@@ -301,23 +311,23 @@ with st.sidebar:
         lrbias2 = st.slider("L/R Anode Bias (%)", -50, 50, 0, 1, key="lr2")
         hall2 = st.slider("Hall Drift Build-Up (%)", 0, 50, 10, 1, key="h2")
 
-with st.spinner('Calculating 3D Multiphysics Field (Hall Drift & Turnarounds)...'):
+with st.spinner('Calculating Phase Offsets & 3D Multiphysics Fields...'):
     if "Step 1" in view_mode:
         show_comb = False
         pts_norm, grid_norm, final_unif, final_mean, passes, total_time, base_c, x_peak, _, _, act_interp = compute_multipass_fast(
-            L, v1, r1, amp1/100, skew1/100, lrbias1/100, hall1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
+            L, v1, r1, dwell1, amp1/100, skew1/100, lrbias1/100, hall1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
         disp_passes, act_amp, act_skew, act_rate, act_alpha, act_w, act_cos = f"{passes:,}", amp1/100.0, skew1/100.0, p1, alpha1, w1, cos1
         act_lr, act_hall = lrbias1/100.0, hall1/100.0
     elif "Step 2" in view_mode:
         show_comb = False
         pts_norm, grid_norm, final_unif, final_mean, passes, total_time, base_c, x_peak, _, _, act_interp = compute_multipass_fast(
-            L, v2, r2, amp2/100, skew2/100, lrbias2/100, hall2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
+            L, v2, r2, dwell2, amp2/100, skew2/100, lrbias2/100, hall2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
         disp_passes, act_amp, act_skew, act_rate, act_alpha, act_w, act_cos = f"{passes:,}", amp2/100.0, skew2/100.0, p2, alpha2, w2, cos2
         act_lr, act_hall = lrbias2/100.0, hall2/100.0
     else:
         show_comb = True
-        _, _, _, _, n1, time1, bc1, _, pts1, grid1, interp1 = compute_multipass_fast(L, v1, r1, amp1/100, skew1/100, lrbias1/100, hall1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
-        _, _, _, _, n2, time2, bc2, _, pts2, grid2, interp2 = compute_multipass_fast(L, v2, r2, amp2/100, skew2/100, lrbias2/100, hall2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
+        _, _, _, _, n1, time1, bc1, _, pts1, grid1, interp1 = compute_multipass_fast(L, v1, r1, dwell1, amp1/100, skew1/100, lrbias1/100, hall1/100, t1, p1, wx, wy, grid_x, grid_y, alpha1, w1, t_mat, d_surf, cos1)
+        _, _, _, _, n2, time2, bc2, _, pts2, grid2, interp2 = compute_multipass_fast(L, v2, r2, dwell2, amp2/100, skew2/100, lrbias2/100, hall2/100, t2, p2, wx, wy, grid_x, grid_y, alpha2, w2, t_mat, d_surf, cos2)
         
         thick_pts, thick_grid = pts1 + pts2, grid1 + grid2
         final_mean = np.mean(thick_pts) / 1000.0
@@ -335,7 +345,7 @@ col3.metric("Required Linear Passes", disp_passes)
 col4.metric("Process Cycle Time", format_time(total_time))
 
 if final_unif <= 1.0: st.success("✅ **TARGET ACHIEVED:** Multiphysics rotary simulation yields sub-1% uniformity.")
-else: st.error("❌ **TARGET NOT MET:** Adjust Translation Speed, Hardware Geometry, or Hardware Limits.")
+else: st.error("❌ **TARGET NOT MET:** Adjust Rotation RPH or Dwell Angle to break Kinematic Resonance.")
 st.divider()
 
 # --- 4. Render 6-Panel Matplotlib Charts ---
@@ -473,7 +483,6 @@ if show_comb:
     ax_vert.plot(y_vals, rate_y, color='#1E3A8A', lw=2.5, label='Combined Diffused Flux')
     ax_vert.legend(loc='lower center')
 else:
-    # Smooth, continuous emission shape visualization for Left and Right legs
     u_vals = np.clip(2 * y_vals / L, -1.0, 1.0)
     
     ta_boost = np.maximum(0.0, -act_amp * 2.0) * (np.abs(u_vals)**6)
