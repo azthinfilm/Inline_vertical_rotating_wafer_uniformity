@@ -37,8 +37,9 @@ except: pass
 
 # --- 2. Advanced 3D Vectorized Racetrack Engine ---
 @st.cache_data
-def setup_geometry():
-    R_wafer, edge_exc = 150.0, 3.0
+def setup_geometry(substrate_diameter):
+    R_wafer = substrate_diameter / 2.0
+    edge_exc = 3.0
     R_max = R_wafer - edge_exc
     r1, r2, r3 = R_max * np.sqrt(5)/7, R_max * np.sqrt(17)/7, R_max * np.sqrt(37)/7
     radii_rings, points_per_ring = [0, r1, r2, r3], [1, 8, 16, 24]
@@ -256,7 +257,9 @@ with st.expander("📚 **View Engineering Physics Documentation & Mathematical A
     Historical models simulate turnaround wear as sharp step-functions. This simulator employs a $C^0$ continuous geometric interpolation. When a negative **Profile Bow** is applied (representing "dog-bone" target wear), the engine scales a higher-order polynomial ($u^6$) to smoothly boost the apex of the turnarounds. This correctly eliminates visual discontinuities while simulating massive localized plasma trapping in the erosion trenches.
     """)
 
-wx, wy, grid_x, grid_y, R_wafer = setup_geometry()
+
+
+
 
 with st.sidebar:
     try:
@@ -272,7 +275,11 @@ with st.sidebar:
     if "Combined" in view_mode: st.info("Hardware physics graphs will display Step 1 & 2 merged overlays.")
     
     st.header("2. Shared Hardware Geometry")
+    substrate_diameter = st.slider("Substrate Diameter (mm)", 100, 600, 300, 10)
+  
     t_mat = st.slider("Target Material Thickness (mm)", 2.0, 20.0, 10.0, 1.0)
+    wx, wy, grid_x, grid_y, R_wafer = setup_geometry(substrate_diameter)
+
     st.caption(f"Base Tube OD: 132.5 mm | **Total Target OD: {132.5 + 2*t_mat:.1f} mm**")
     d_surf = st.slider("Target-to-Substrate Dist. (mm)", 50, 300, 100, 5)
     L = st.slider("Cathode Length (mm)", 650, 900, 800, 10)
@@ -413,8 +420,8 @@ ax_horiz.legend(loc='lower center', fontsize=9)
 ax_map = fig.add_subplot(gs[0, 2])
 ax_map.set_title("Accumulated Thickness Map", fontweight='bold')
 ax_map.set_aspect('equal')
-ax_map.set_xlim(-160, 160)
-ax_map.set_ylim(-160, 160)
+ax_map.set_xlim(-R_wafer - 10, R_wafer + 10)
+ax_map.set_ylim(-R_wafer - 10, R_wafer + 10)
 ax_map.add_patch(Circle((0,0), R_wafer, fill=False, color='black', lw=2))
 levels = np.linspace(100 - dev, 100 + dev, 40) 
 contour = ax_map.contourf(grid_x, grid_y, grid_norm, levels=levels, cmap='viridis', extend='both')
@@ -526,7 +533,7 @@ ax_stats.axhline(100, color='gray', linestyle='--', lw=2)
 ax_stats.set_title("49-Point Radial Analysis", fontweight='bold')
 ax_stats.set_xlabel("Distance from Wafer Center (mm)")
 ax_stats.set_ylabel("Normalized Thickness (%)")
-ax_stats.set_xlim(-5, 155)
+ax_stats.set_xlim(-5, R_wafer + 5)
 ax_stats.set_ylim(100 - dev, 100 + dev)
 ax_stats.grid(True, linestyle='--', alpha=0.5)
 
